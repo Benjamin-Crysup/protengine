@@ -1,0 +1,234 @@
+//Things for working with zstandard: more trouble than it's worth
+
+
+
+/**This will use zlib compression.*/
+class ZStdCompressionMethod : public CompressionMethod{
+public:
+	/**Deconstruct*/
+	~ZStdCompressionMethod();
+	
+	void* comfopen(const char* fileName, const char* mode);
+	size_t comfwrite(const void* ptr, size_t size, size_t count, void* stream);
+	size_t comfread(void* ptr, size_t size, size_t count, void* stream);
+	intptr_t comftell(void* stream);
+	int comfclose(void* stream);
+	uintptr_t* decompressData(uintptr_t datLen, char* data);
+	uintptr_t* compressData(uintptr_t datLen, char* data);
+};
+
+
+
+/**A zstandard file.*/
+typedef struct{
+	/**The actual file.*/
+	FILE* realFile;
+	/**Whether this was ever written to.*/
+	bool everWritten;
+	/**The number of reads/writes on the file.*/
+	intptr_t numOperate;
+	/**The number of caracters waiting to be written/read.*/
+	uintptr_t numWait;
+	/**The offset from the start of the buffer for the next read.*/
+	uintptr_t offsetInd;
+	/**A buffer for pure text.*/
+	char* waitBuffer;
+	/**The current size of the wonky buffer.*/
+	uintptr_t curComDecomSize;
+	/**The wonky buffer, used for compression or decompression.*/
+	char* comdecomBuffer;
+} ptcom_zstd_file;
+
+ZStdCompressionMethod::~ZStdCompressionMethod(){}
+	
+void* ZStdCompressionMethod::comfopen(const char* fileName, const char* mode){
+	FILE* realFile = fopen(fileName, mode);
+	if(realFile == 0){
+		return 0;
+	}
+	ptcom_zstd_file* wrapFile = (ptcom_zstd_file*)malloc(sizeof(ptcom_zstd_file));
+	wrapFile->realFile = realFile;
+	wrapFile->everWritten = false;
+	wrapFile->numOperate = 0;
+	wrapFile->numWait = 0;
+	wrapFile->offsetInd = 0;
+	wrapFile->waitBuffer = (char*)malloc(2*BUFFER_LEN);
+	wrapFile->curComDecomSize = 0;
+	wrapFile->comdecomBuffer = 0;
+	return wrapFile;
+}
+
+/**
+ * This will dump the data waiting to be written.
+ * @param The file to manage.
+ * @return Whether there was a problem.
+ */
+int ptcom_dumpWriteBuffer(ptcom_zstd_file* wrapFile){
+	//make a place for the compressed data
+	uintptr_t workNeedSize = ZSTD_compressBound(wrapFile->numWait);
+	if(workNeedSize > wrapFile->curComDecomSize){
+		if(wrapFile->comdecomBuffer){
+			free(wrapFile->comdecomBuffer);
+		}
+		wrapFile->curComDecomSize = workNeedSize;
+		wrapFile->comdecomBuffer = (char*)malloc(workNeedSize);
+	}
+	//compress the data
+	uintptr_t outDumpSize = ZSTD_compress(wrapFile->comdecomBuffer, workNeedSize, wrapFile->waitBuffer, wrapFile->numWait, 1);
+	//note the size of the compressed data
+	char lenBuffer[PIECE_LEN_BYTES];
+	for(int i = 0; i<4; i++){
+		lenBuffer[i] = 0x00FF & (outDumpSize >> (8*i));
+	}
+	//write the size and the data
+	uintptr_t nW = fwrite(lenBuffer, 1, PIECE_LEN_BYTES, wrapFile->realFile);
+	nW = nW + fwrite(wrapFile->comdecomBuffer, 1, outDumpSize, wrapFile->realFile);
+	//note the dump
+	wrapFile->numWait = 0;
+	//if either failed, note the error
+	if(nW != (PIECE_LEN_BYTES + outDumpSize)){
+		return 1;
+	}
+	return 0;
+}
+
+size_t ZStdCompressionMethod::comfwrite(const void* ptr, size_t size, size_t count, void* stream){
+	if(size > BUFFER_LEN){
+		return 0;
+	}
+	ptcom_zstd_file* wrapFile = (ptcom_zstd_file*)stream;
+	wrapFile->everWritten = true;
+	const char* curFocus = (char*)ptr;
+	size_t subCount = count;
+	//figure out how many can go on the current buffer
+	size_t numCanGo = (BUFFER_LEN - wrapFile->numWait)/size;
+    numCanGo = ((numCanGo < subCount) ? numCanGo : subCount);
+	if(numCanGo){
+		wrapFile->numOperate += (size * numCanGo);
+		memcpy(wrapFile->waitBuffer + wrapFile->numWait, curFocus, size*numCanGo);
+		wrapFile->numWait += (size*numCanGo);
+		subCount = subCount - numCanGo;
+	}
+	else{
+		if(ptcom_dumpWriteBuffer(wrapFile)){
+			return 0;
+		}
+	}
+	//write again if stuff left
+	if(subCount){
+		return numCanGo + comfwrite(curFocus + (numCanGo*size), size, subCount, stream);
+	}
+	else{
+		return numCanGo;
+	}
+}
+
+/**
+ * This will prepare data for reading.
+ * @param The file to manage.
+ * @return Whether there was a problem.
+ */
+int ptcom_fillReadBuffer(ptcom_zstd_file* wrapFile){
+	//note the size of the compressed data
+	char lenBuffer[PIECE_LEN_BYTES];
+	uintptr_t nR = fread(lenBuffer, 1, PIECE_LEN_BYTES, wrapFile->realFile);
+	if(nR != PIECE_LEN_BYTES){
+		return 1;
+	}
+	uintptr_t inDumpSize = 0;
+	for(int i = 0; i<4; i++){
+		inDumpSize = inDumpSize + ((0x00FF & lenBuffer[i])<<(8*i));
+	}
+	//make a place for the compressed data
+	if(inDumpSize > wrapFile->curComDecomSize){
+		if(wrapFile->comdecomBuffer){
+			free(wrapFile->comdecomBuffer);
+		}
+		wrapFile->curComDecomSize = inDumpSize;
+		wrapFile->comdecomBuffer = (char*)malloc(inDumpSize);
+	}
+	//read
+	nR = fread(wrapFile->comdecomBuffer, 1, inDumpSize, wrapFile->realFile);
+	if(nR != inDumpSize){
+		return 1;
+	}
+	//salvage any remaining data
+	uintptr_t numSalvage = wrapFile->numWait;
+	for(uintptr_t i = 0; i<numSalvage; i++){
+		wrapFile->waitBuffer[i] = wrapFile->waitBuffer[i+wrapFile->offsetInd];
+	}
+	//decopress
+	wrapFile->numWait = numSalvage + ZSTD_decompress(wrapFile->waitBuffer + numSalvage, BUFFER_LEN, wrapFile->comdecomBuffer, inDumpSize);
+	wrapFile->offsetInd = 0;
+	return 0;
+}
+
+size_t ZStdCompressionMethod::comfread(void* ptr, size_t size, size_t count, void* stream){
+	if(size > BUFFER_LEN){
+		return 0;
+	}
+	ptcom_zstd_file* wrapFile = (ptcom_zstd_file*)stream;
+	char* curFocus = (char*)ptr;
+	size_t subCount = count;
+	//figure out how many can go on the current buffer
+	size_t numCanGo = (wrapFile->numWait)/size;
+	numCanGo = ((numCanGo < count) ? numCanGo : count);
+	if(numCanGo){
+		wrapFile->numOperate += (size*numCanGo);
+		memcpy(curFocus, wrapFile->waitBuffer + wrapFile->offsetInd, size*numCanGo);
+		wrapFile->numWait -= (numCanGo*size);
+		wrapFile->offsetInd += (numCanGo*size);
+		subCount -= numCanGo;
+	}
+	else{
+		if(ptcom_fillReadBuffer(wrapFile)){
+			return 0;
+		}
+	}
+	//read again if stuff left
+	if(subCount){
+		return numCanGo + comfread(curFocus + (numCanGo*size), size, subCount, stream);
+	}
+	else{
+		return numCanGo;
+	}
+}
+
+intptr_t ZStdCompressionMethod::comftell(void* stream){
+	ptcom_zstd_file* wrapFile = (ptcom_zstd_file*)stream;
+	return wrapFile->numOperate;
+}
+
+int ZStdCompressionMethod::comfclose(void* stream){
+	ptcom_zstd_file* wrapFile = (ptcom_zstd_file*)stream;
+	int dumpProb = 0;
+	if(wrapFile->everWritten && (wrapFile->numWait > 0)){
+		dumpProb = ptcom_dumpWriteBuffer(wrapFile);
+	}
+	int closeProb = fclose(wrapFile->realFile);
+	free(wrapFile->waitBuffer);
+	if(wrapFile->comdecomBuffer){
+		free(wrapFile->comdecomBuffer);
+	}
+	free(wrapFile);
+	return (dumpProb || closeProb);
+}
+
+uintptr_t* ZStdCompressionMethod::decompressData(uintptr_t datLen, char* data){
+	uintptr_t workNeedSize = ZSTD_getFrameContentSize(data, datLen);
+	uintptr_t* lenStore = (uintptr_t*)malloc(workNeedSize + sizeof(uintptr_t));
+	char* datStore = (char*)(lenStore+1);
+	uintptr_t outDumpSize = ZSTD_decompress(datStore, workNeedSize, data, datLen);
+	*lenStore = outDumpSize;
+	return lenStore;
+}
+
+uintptr_t* ZStdCompressionMethod::compressData(uintptr_t datLen, char* data){
+	uintptr_t workNeedSize = ZSTD_compressBound(datLen);
+	uintptr_t* lenStore = (uintptr_t*)malloc(workNeedSize + sizeof(uintptr_t));
+	char* datStore = (char*)(lenStore+1);
+	uintptr_t outDumpSize = ZSTD_compress(datStore, workNeedSize, data, datLen, 1);
+	*lenStore = outDumpSize;
+	return lenStore;
+}
+
