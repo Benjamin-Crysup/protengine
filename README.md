@@ -224,4 +224,6 @@ Same story with methionine as before.
 If the peptide is preceded by a K or R, and contains the end, it is valid.
 If the peptide is preceded by and ends with either K or R, it is valid.
 
+## Funding
 
+This research is based upon work supported in part by the Office of the Director of National Intelligence (ODNI), Intelligence Advanced Research Projects Activity (IARPA), via contract number 2018-18041000003. The views and conclusions contained herein are those of the authors and should not be interpreted as necessarily representing the official policies, either expressed or implied, of ODNI, IARPA, or the U.S. Government. The U.S. Government is authorized to reproduce and distribute reprints for governmental purposes notwithstanding any copyright annotation therein.
