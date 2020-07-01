@@ -24,12 +24,14 @@ void* GZipCompressionMethod::comfopen(const char* fileName, const char* mode){
 
 size_t GZipCompressionMethod::comfwrite(const void* ptr, size_t size, size_t count, void* stream){
 	gzFile* toRet = (gzFile*)stream;
-	return gzfwrite(ptr, size, count, *toRet);
+	size_t numWrite = gzwrite(*toRet, ptr, size*count);
+	return numWrite / size;
 }
 
 size_t GZipCompressionMethod::comfread(void* ptr, size_t size, size_t count, void* stream){
 	gzFile* toRet = (gzFile*)stream;
-	return gzfread(ptr, size, count, *toRet);
+	size_t numRead = gzread(*toRet, ptr, size*count);
+	return numRead / size;
 }
 
 intptr_t GZipCompressionMethod::comftell(void* stream){
